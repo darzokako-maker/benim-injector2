@@ -1,4 +1,4 @@
-name: Sorozaza Ultimate Fix
+name: Sorozaza Root Fix
 
 on: 
   push:
@@ -20,10 +20,8 @@ jobs:
 
       - name: Derleme Islemi
         run: |
-          # Injector Derle - Statik kütüphaneler eklendi (Hata vermemesi için)
+          # Sadece en temel Windows kütüphanelerini bağlayarak derliyoruz
           g++ injector.cpp -o injector.exe -m64 -static -lkernel32 -luser32 -lpsapi -s -O3
-
-          # DLL Derle
           g++ -shared cheat.cpp -o hile.dll -m64 -static -luser32 -lgdi32 -ldwmapi -lpsapi -s -O3
 
       - name: Paketi Sun
