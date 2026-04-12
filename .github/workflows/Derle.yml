@@ -1,4 +1,4 @@
-name: Sorozaza Root Fix
+name: Sorozaza Ultimate Fix
 
 on: 
   push:
@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Kodlari Cek
-        uses: actions/checkout@v4
+        uses: checkout@v4
 
       - name: MinGW Kurulumu
         uses: egor-tensin/setup-mingw@v2
@@ -20,15 +20,16 @@ jobs:
 
       - name: Derleme Islemi
         run: |
-          # Sadece en temel Windows kütüphanelerini bağlayarak derliyoruz
+          # Injector Derle (Hata veren GUI kutuphaneleri cikartildi, daha stabil)
           g++ injector.cpp -o injector.exe -m64 -static -lkernel32 -luser32 -lpsapi -s -O3
+
+          # DLL Derle
           g++ -shared cheat.cpp -o hile.dll -m64 -static -luser32 -lgdi32 -ldwmapi -lpsapi -s -O3
 
       - name: Paketi Sun
-        uses: actions/upload-artifact@v4
+        uses: upload-artifact@v4
         with:
-          name: Sorozaza_Final_Pack
+          name: Sorozaza_Stable_Pack
           path: |
             injector.exe
             hile.dll
-            
