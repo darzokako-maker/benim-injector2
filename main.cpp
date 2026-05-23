@@ -4,47 +4,46 @@
 #include <string>
 #include <commdlg.h>
 
-// Klasörden DLL seçme penceresi
-std::string KlasordenDllSec() {
-    OPENFILENAMEA ofn;
-    char szFile[260] = { 0 };
+// Klasörden DLL seçme penceresi (Unicode / Wide Char Uyumlu hale getirildi)
+std::wstring KlasordenDllSec() {
+    OPENFILENAMEW ofn;
+    wchar_t szFile[260] = { 0 };
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = NULL;
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = "Dynamic Link Library (*.dll)\0*.dll\0Tum Dosyalar (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Dynamic Link Library (*.dll)\0*.dll\0Tum Dosyalar (*.*)\0*.*\0";
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
     ofn.lpstrInitialDir = NULL;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 
-    if (GetOpenFileNameA(&ofn) == TRUE) {
-        return std::string(ofn.lpstrFile);
+    if (GetOpenFileNameW(&ofn) == TRUE) {
+        return std::wstring(ofn.lpstrFile);
     }
-    return "";
+    return L"";
 }
 
-// Hedef sürecin ID'sini ve ilk geçerli Thread ID'sini bulan fonksiyon
-DWORD OyunVeThreadIdBul(const char* uygulamaIsmi, DWORD& threadId) {
+// Hedef sürecin ID'sini ve ilk geçerli Thread ID'sini bulan fonksiyon (Unicode)
+DWORD OyunVeThreadIdBul(const wchar_t* uygulamaIsmi, DWORD& threadId) {
     DWORD processId = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32 pe;
+        PROCESSENTRY32W pe; // Unicode yapısı
         pe.dwSize = sizeof(pe);
-        if (Process32First(hSnap, &pe)) {
+        if (Process32FirstW(hSnap, &pe)) {
             do {
-                if (!_strcmpi(pe.szExeFile, uygulamaIsmi)) {
+                if (!_wcsicmp(pe.szExeFile, uygulamaIsmi)) {
                     processId = pe.th32ProcessID;
                     break;
                 }
-            } while (Process32Next(hSnap, &pe));
+            } while (Process32NextW(hSnap, &pe));
         }
         CloseHandle(hSnap);
     }
 
-    // Sürece ait yasal bir Thread buluyoruz (Hijacking için)
     if (processId != 0) {
         HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if (hThreadSnap != INVALID_HANDLE_VALUE) {
@@ -65,19 +64,19 @@ DWORD OyunVeThreadIdBul(const char* uygulamaIsmi, DWORD& threadId) {
 }
 
 int main() {
-    SetConsoleTitleA("Universal DLL Injector");
+    SetConsoleTitleW(L"Universal DLL Injector");
 
-    std::cout << "[*] Lutfen enjekte edilecek DLL dosyasini secin...\n";
-    std::string dllYolu = KlasordenDllSec();
+    std::wcout << L"[*] Lutfen enjekte edilecek DLL dosyasini secin...\n";
+    std::wstring dllYolu = KlasordenDllSec();
 
     if (dllYolu.empty()) {
-        std::cout << "[-] Dosya secilmedi. Cikis yapiliyor.\n";
+        std::wcout << L"[-] Dosya secilmedi. Cikis yapiliyor.\n";
         Sleep(2000);
         return 0;
     }
 
-    const char* hedefOyun = "ProSoccerOnline-Win64-Shipping.exe";
-    std::cout << "[*] Oyun ve yasal is parcacigi (Thread) bekleniyor...\n";
+    const wchar_t* hedefOyun = L"ProSoccerOnline-Win64-Shipping.exe";
+    std::wcout << L"[*] Oyun ve yasal is parcacigi (Thread) bekleniyor...\n";
 
     DWORD pID = 0;
     DWORD tID = 0;
@@ -86,40 +85,40 @@ int main() {
         Sleep(500);
     }
 
-    std::cout << "[+] Oyun Bulundu! PID: " << pID << " | Thread ID: " << tID << "\n";
+    std::wcout << L"[+] Oyun Bulundu! PID: " << pID << L" | Thread ID: " << tID << L"\n";
 
-    // Süreci açıyoruz
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pID);
     if (!hProcess) {
-        std::cout << "[-] Oyuna baglanilamadi. Yonetici olarak calistirin.\n";
+        std::wcout << L"[-] Oyuna baglanilamadi. Yonetici olarak calistirin.\n";
         system("pause");
         return 0;
     }
 
-    // 1. BELLEK GİZLİLİĞİ: Alanı ilk başta sadece Okuma/Yazma olarak açıyoruz (Çalıştırılabilir değil)
-    void* ayrilanAlan = VirtualAllocEx(hProcess, nullptr, dllYolu.length() + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // Bellek boyutu wchar_t cinsinden hesaplanıyor (byte boyutu için * sizeof(wchar_t))
+    SIZE_t dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
+
+    // Bellek alanı açılıyor
+    void* ayrilanAlan = VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!ayrilanAlan) {
         CloseHandle(hProcess);
         return 0;
     }
 
-    // DLL yolunu yazıyoruz
-    WriteProcessMemory(hProcess, ayrilanAlan, dllYolu.c_str(), dllYolu.length() + 1, nullptr);
+    // DLL yolu belleğe yazılıyor
+    WriteProcessMemory(hProcess, ayrilanAlan, dllYolu.c_str(), dllPathSize, nullptr);
 
-    // LoadLibraryA adresini alıyoruz
-    LPVOID loadLibraryAdresi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
+    // GİZLİLİK: LoadLibraryA yerine Unicode destekleyen LoadLibraryW fonksiyonunu çağırıyoruz
+    LPVOID loadLibraryAdresi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW");
 
-    // 2. THREAD HIJACKING: Yeni thread açmak yerine mevcut olanı ele geçiriyoruz
+    // THREAD HIJACKING işlemleri
     HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tID);
     if (hThread) {
-        SuspendThread(hThread); // Thread'i geçici olarak durdur
+        SuspendThread(hThread);
 
         CONTEXT ctx;
         ctx.ContextFlags = CONTEXT_CONTROL;
         GetThreadContext(hThread, &ctx);
 
-        // RIP (Instruction Pointer) kaydını LoadLibraryA adresine yönlendiriyoruz
-        // Bu işlem thread devam ettiğinde bizim kodumuzu çalıştırmasını sağlar
         #ifdef _WIN64
         ctx.Rip = (DWORD64)loadLibraryAdresi;
         #else
@@ -127,26 +126,24 @@ int main() {
         #endif
 
         SetThreadContext(hThread, &ctx);
-        ResumeThread(hThread); // Thread'i normal düzenine geri döndür
+        ResumeThread(hThread);
         CloseHandle(hThread);
         
-        std::cout << "[+] Is parcacigi basariyla manipule edildi.\n";
+        std::wcout << L"[+] Is parcacigi basariyla manipule edildi.\n";
     } else {
-        std::cout << "[-] Istek basarisiz oldu.\n";
+        std::wcout << L"[-] Istek basarisiz oldu.\n";
         VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
         CloseHandle(hProcess);
         return 0;
     }
 
-    std::cout << "[+] Enjeksiyon tamamlandi.\n";
+    std::wcout << L"[+] Enjeksiyon tamamlandi.\n";
 
-    // 3. BELLEK KORUMASI: İşlem bittikten sonra bu bellek alanının izinlerini tamamen kapatıyoruz
-    // Böylece bellek taramalarında "boş/erişilemez" alan olarak görünür ve analiz edilemez.
+    // BELLEK GİZLEME: İş bitti, alanı erişime kapatıyoruz
     DWORD eskiKoruma;
-    VirtualProtectEx(hProcess, ayrilanAlan, dllYolu.length() + 1, PAGE_NOACCESS, &eskiKoruma);
+    VirtualProtectEx(hProcess, ayrilanAlan, dllPathSize, PAGE_NOACCESS, &eskiKoruma);
 
     CloseHandle(hProcess);
     Sleep(2000);
     return 0;
 }
-
