@@ -1,0 +1,28 @@
+name: Automated Injector Build
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Depoyu Bilgisayara Cek (Checkout)
+      uses: actions/checkout@v4
+
+    - name: MSBuild ve C++ Derleyicisini Kur (PATH Ayari)
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Injector Kodunu Derle (Compile)
+      run: |
+        cl.exe /EHsc /O2 /Fe:Injector.exe main.cpp user32.lib comdlg32.lib
+
+    - name: Olusan EXE Dosyasini Yukle (Artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: Bellek_Korumali_Injector
+        path: Injector.exe
+        
