@@ -4,7 +4,7 @@
 #include <string>
 #include <commdlg.h>
 
-// Klasörden DLL seçme penceresi (Unicode / Wide Char Uyumlu hale getirildi)
+// Klasörden DLL seçme penceresi (Unicode)
 std::wstring KlasordenDllSec() {
     OPENFILENAMEW ofn;
     wchar_t szFile[260] = { 0 };
@@ -26,12 +26,12 @@ std::wstring KlasordenDllSec() {
     return L"";
 }
 
-// Hedef sürecin ID'sini ve ilk geçerli Thread ID'sini bulan fonksiyon (Unicode)
+// Hedef sürecin ID'sini ve ilk geçerli Thread ID'sini bulan fonksiyon
 DWORD OyunVeThreadIdBul(const wchar_t* uygulamaIsmi, DWORD& threadId) {
     DWORD processId = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe; // Unicode yapısı
+        PROCESSENTRY32W pe;
         pe.dwSize = sizeof(pe);
         if (Process32FirstW(hSnap, &pe)) {
             do {
@@ -94,23 +94,19 @@ int main() {
         return 0;
     }
 
-    // Bellek boyutu wchar_t cinsinden hesaplanıyor (byte boyutu için * sizeof(wchar_t))
-    SIZE_t dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
+    SIZE_T dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
 
-    // Bellek alanı açılıyor
     void* ayrilanAlan = VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!ayrilanAlan) {
         CloseHandle(hProcess);
         return 0;
     }
 
-    // DLL yolu belleğe yazılıyor
-    WriteProcessMemory(hProcess, ayrilanAlan, dllYolu.c_str(), dllPathSize, nullptr);
+    // HATA DÜZELTİLDİ: dllYolu.c_str() verisi (LPCVOID) yani const void* tipine açıkça dönüştürüldü
+    WriteProcessMemory(hProcess, ayrilanAlan, (LPCVOID)dllYolu.c_str(), dllPathSize, nullptr);
 
-    // GİZLİLİK: LoadLibraryA yerine Unicode destekleyen LoadLibraryW fonksiyonunu çağırıyoruz
     LPVOID loadLibraryAdresi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW");
 
-    // THREAD HIJACKING işlemleri
     HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tID);
     if (hThread) {
         SuspendThread(hThread);
@@ -119,11 +115,8 @@ int main() {
         ctx.ContextFlags = CONTEXT_CONTROL;
         GetThreadContext(hThread, &ctx);
 
-        #ifdef _WIN64
+        // HATA DÜZELTİLDİ: Derleyicinin x64 mimarisinde Rip kaydını kesin tanıması sağlandı
         ctx.Rip = (DWORD64)loadLibraryAdresi;
-        #else
-        ctx.Eip = (DWORD)loadLibraryAdresi;
-        #endif
 
         SetThreadContext(hThread, &ctx);
         ResumeThread(hThread);
@@ -139,7 +132,6 @@ int main() {
 
     std::wcout << L"[+] Enjeksiyon tamamlandi.\n";
 
-    // BELLEK GİZLEME: İş bitti, alanı erişime kapatıyoruz
     DWORD eskiKoruma;
     VirtualProtectEx(hProcess, ayrilanAlan, dllPathSize, PAGE_NOACCESS, &eskiKoruma);
 
