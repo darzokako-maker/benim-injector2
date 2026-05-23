@@ -13,12 +13,16 @@ jobs:
     - name: Depoyu Bilgisayara Cek (Checkout)
       uses: actions/checkout@v4
 
-    - name: MSBuild ve C++ Derleyicisini Kur (PATH Ayari)
-      uses: microsoft/setup-msbuild@v2
+    # Yenilik: C++ Derleyicisini (cl.exe) ve ortam değişkenlerini otomatik olarak yükler
+    - name: MSVC C++ Derleyicisini Kur (cl.exe PATH Ayari)
+      uses: ilam/setup-msvc@v1
+      with:
+        msvc-version: 'latest'
+        architecture: 'x64'
 
     - name: Injector Kodunu Derle (Compile)
       run: |
-        cl.exe /EHsc /O2 /Fe:Injector.exe main.cpp user32.lib comdlg32.lib
+        cl.exe /EHsc /O2 /DUNICODE /D_UNICODE /Fe:Injector.exe main.cpp user32.lib comdlg32.lib /link /machine:x64
 
     - name: Olusan EXE Dosyasini Yukle (Artifact)
       uses: actions/upload-artifact@v4
