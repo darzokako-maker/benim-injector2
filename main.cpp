@@ -4,7 +4,14 @@
 #include <string>
 #include <commdlg.h>
 
-// Klasörden DLL seçme penceresi (Unicode)
+// IAT taramalarını ve anti-cheat analizlerini atlatmak için fonksiyon işaretçileri
+typedef HANDLE(WINAPI* pOpenProcess)(DWORD, BOOL, DWORD);
+typedef LPVOID(WINAPI* pVirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
+typedef BOOL(WINAPI* pWriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
+typedef HANDLE(WINAPI* pCreateRemoteThread)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+typedef BOOL(WINAPI* pVirtualFreeEx)(HANDLE, LPVOID, SIZE_T, DWORD);
+
+// Klasörden manuel DLL seçmek için Unicode pencere açar
 std::wstring KlasordenDllSec() {
     OPENFILENAMEW ofn;
     wchar_t szFile[260] = { 0 };
@@ -26,8 +33,8 @@ std::wstring KlasordenDllSec() {
     return L"";
 }
 
-// Hedef sürecin ID'sini ve ilk geçerli Thread ID'sini bulan fonksiyon
-DWORD OyunVeThreadIdBul(const wchar_t* uygulamaIsmi, DWORD& threadId) {
+// Oyunun Süreç (Process) ID'sini bulan fonksiyon
+DWORD OyunIdBul(const wchar_t* uygulamaIsmi) {
     DWORD processId = 0;
     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnap != INVALID_HANDLE_VALUE) {
@@ -43,27 +50,11 @@ DWORD OyunVeThreadIdBul(const wchar_t* uygulamaIsmi, DWORD& threadId) {
         }
         CloseHandle(hSnap);
     }
-
-    if (processId != 0) {
-        HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (hThreadSnap != INVALID_HANDLE_VALUE) {
-            THREADENTRY32 te;
-            te.dwSize = sizeof(te);
-            if (Thread32First(hThreadSnap, &te)) {
-                do {
-                    if (te.th32OwnerProcessID == processId) {
-                        threadId = te.th32ThreadID;
-                        break;
-                    }
-                } while (Thread32Next(hThreadSnap, &te));
-            }
-            CloseHandle(hThreadSnap);
-        }
-    }
     return processId;
 }
 
 int main() {
+    // Konsol başlığı standart kalıyor
     SetConsoleTitleW(L"Universal DLL Injector");
 
     std::wcout << L"[*] Lutfen enjekte edilecek DLL dosyasini secin...\n";
@@ -75,67 +66,76 @@ int main() {
         return 0;
     }
 
+    // Hedef oyun ismi
     const wchar_t* hedefOyun = L"ProSoccerOnline-Win64-Shipping.exe";
-    std::wcout << L"[*] Oyun ve yasal is parcacigi (Thread) bekleniyor...\n";
+    std::wcout << L"[*] Oyun bekleniyor...\n";
 
+    // Oyun açılana kadar döngüde bekle
     DWORD pID = 0;
-    DWORD tID = 0;
-    while (pID == 0 || tID == 0) {
-        pID = OyunVeThreadIdBul(hedefOyun, tID);
+    while (pID == 0) {
+        pID = OyunIdBul(hedefOyun);
         Sleep(500);
     }
 
-    std::wcout << L"[+] Oyun Bulundu! PID: " << pID << L" | Thread ID: " << tID << L"\n";
+    std::wcout << L"[+] Oyun Bulundu! PID: " << pID << L"\n";
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pID);
+    // Windows API fonksiyonlarını kernel32.dll içinden gizlice dinamik olarak çekiyoruz
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    if (!hKernel32) return 0;
+
+    pOpenProcess _OpenProcess = (pOpenProcess)GetProcAddress(hKernel32, "OpenProcess");
+    pVirtualAllocEx _VirtualAllocEx = (pVirtualAllocEx)GetProcAddress(hKernel32, "VirtualAllocEx");
+    pWriteProcessMemory _WriteProcessMemory = (pWriteProcessMemory)GetProcAddress(hKernel32, "WriteProcessMemory");
+    pCreateRemoteThread _CreateRemoteThread = (pCreateRemoteThread)GetProcAddress(hKernel32, "CreateRemoteThread");
+    pVirtualFreeEx _VirtualFreeEx = (pVirtualFreeEx)GetProcAddress(hKernel32, "VirtualFreeEx");
+
+    // Oyuna tam yetkiyle bağlan
+    HANDLE hProcess = _OpenProcess(PROCESS_ALL_ACCESS, FALSE, pID);
     if (!hProcess) {
         std::wcout << L"[-] Oyuna baglanilamadi. Yonetici olarak calistirin.\n";
         system("pause");
         return 0;
     }
 
+    // Bellek boyutunu Unicode karakter yapısına göre hesapla
     SIZE_T dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
 
-    void* ayrilanAlan = VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // Oyun hafızasında yer aç
+    void* ayrilanAlan = _VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!ayrilanAlan) {
         CloseHandle(hProcess);
         return 0;
     }
 
-    // HATA DÜZELTİLDİ: dllYolu.c_str() verisi (LPCVOID) yani const void* tipine açıkça dönüştürüldü
-    WriteProcessMemory(hProcess, ayrilanAlan, (LPCVOID)dllYolu.c_str(), dllPathSize, nullptr);
+    // Seçilen DLL yolunu oyunun hafızasına yaz (Tür dönüşümü hatası düzeltildi)
+    _WriteProcessMemory(hProcess, ayrilanAlan, (LPCVOID)dllYolu.c_str(), dllPathSize, nullptr);
 
-    LPVOID loadLibraryAdresi = (LPVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryW");
+    // Yükleyici olarak Unicode destekli LoadLibraryW fonksiyon adresini alıyoruz
+    LPVOID loadLibraryAdresi = (LPVOID)GetProcAddress(hKernel32, "LoadLibraryW");
 
-    HANDLE hThread = OpenThread(THREAD_ALL_ACCESS, FALSE, tID);
-    if (hThread) {
-        SuspendThread(hThread);
-
-        CONTEXT ctx;
-        ctx.ContextFlags = CONTEXT_CONTROL;
-        GetThreadContext(hThread, &ctx);
-
-        // HATA DÜZELTİLDİ: Derleyicinin x64 mimarisinde Rip kaydını kesin tanıması sağlandı
-        ctx.Rip = (DWORD64)loadLibraryAdresi;
-
-        SetThreadContext(hThread, &ctx);
-        ResumeThread(hThread);
-        CloseHandle(hThread);
-        
-        std::wcout << L"[+] Is parcacigi basariyla manipule edildi.\n";
-    } else {
-        std::wcout << L"[-] Istek basarisiz oldu.\n";
-        VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
+    // Enjeksiyonu stabil CreateRemoteThread ile tetikle
+    HANDLE hThread = _CreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)loadLibraryAdresi, ayrilanAlan, 0, nullptr);
+    if (!hThread) {
+        std::wcout << L"[-] Enjeksiyon basarisiz oldu.\n";
+        _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
         CloseHandle(hProcess);
+        system("pause");
         return 0;
     }
 
-    std::wcout << L"[+] Enjeksiyon tamamlandi.\n";
+    std::wcout << L"[+] Enjeksiyon baslatildi! Oyunun hafizasi taranirken donmasini bekleyin...\n";
 
-    DWORD eskiKoruma;
-    VirtualProtectEx(hProcess, ayrilanAlan, dllPathSize, PAGE_NOACCESS, &eskiKoruma);
+    // DLL'in oyuna tamamen yüklenmesini bekle
+    WaitForSingleObject(hThread, INFINITE);
 
+    // BELLEK TEMİZLİĞİ: DLL başarıyla yüklendi, artık arkada bıraktığımız izleri silme zamanı.
+    // Oyun RAM'ine yazdığımız DLL yolunu tamamen boşaltıyoruz.
+    _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
+
+    CloseHandle(hThread);
     CloseHandle(hProcess);
-    Sleep(2000);
+
+    std::wcout << L"[+] Islem tamamlandi. Oyunun donmasi gectikten sonra klasorunuzu kontrol edin.\n";
+    Sleep(3000);
     return 0;
 }
