@@ -13,15 +13,10 @@ jobs:
     - name: Depoyu Bilgisayara Cek (Checkout)
       uses: actions/checkout@v4
 
-    # Yenilik: C++ Derleyicisini (cl.exe) ve ortam değişkenlerini otomatik olarak yükler
-    - name: MSVC C++ Derleyicisini Kur (cl.exe PATH Ayari)
-      uses: ilam/setup-msvc@v1
-      with:
-        msvc-version: 'latest'
-        architecture: 'x64'
-
-    - name: Injector Kodunu Derle (Compile)
+    - name: MSVC Ortamini Yukle ve Kodu Derle (Compile)
+      shell: cmd
       run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
         cl.exe /EHsc /O2 /DUNICODE /D_UNICODE /Fe:Injector.exe main.cpp user32.lib comdlg32.lib /link /machine:x64
 
     - name: Olusan EXE Dosyasini Yukle (Artifact)
