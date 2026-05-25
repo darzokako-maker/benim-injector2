@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <TlHelp32.h>
 #include <string>
-#include <commdlg.h>
 
 // IAT taramalarını ve anti-cheat analizlerini atlatmak için fonksiyon işaretçileri
 typedef HANDLE(WINAPI* pOpenProcess)(DWORD, BOOL, DWORD);
@@ -11,75 +10,44 @@ typedef BOOL(WINAPI* pWriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_
 typedef HANDLE(WINAPI* pCreateRemoteThread)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
 typedef BOOL(WINAPI* pVirtualFreeEx)(HANDLE, LPVOID, SIZE_T, DWORD);
 
-// Klasörden manuel DLL seçmek için Unicode pencere açar
-std::wstring KlasordenDllSec() {
-    OPENFILENAMEW ofn;
-    wchar_t szFile[260] = { 0 };
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = L"Dynamic Link Library (*.dll)\0*.dll\0Tum Dosyalar (*.*)\0*.*\0";
-    ofn.nFilterIndex = 1;
-    ofn.lpstrFileTitle = NULL;
-    ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = NULL;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+// Arka planda CS2'nin açılmasını bekleyen ve PID değerini dönen fonksiyon
+DWORD CsGOProcessBul() {
+    DWORD pid = 0;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) return 0;
 
-    if (GetOpenFileNameW(&ofn) == TRUE) {
-        return std::wstring(ofn.lpstrFile);
-    }
-    return L"";
-}
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
 
-// Oyunun Süreç (Process) ID'sini bulan fonksiyon
-DWORD OyunIdBul(const wchar_t* uygulamaIsmi) {
-    DWORD processId = 0;
-    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W pe;
-        pe.dwSize = sizeof(pe);
-        if (Process32FirstW(hSnap, &pe)) {
-            do {
-                if (!_wcsicmp(pe.szExeFile, uygulamaIsmi)) {
-                    processId = pe.th32ProcessID;
-                    break;
-                }
-            } while (Process32NextW(hSnap, &pe));
-        }
-        CloseHandle(hSnap);
+    if (Process32FirstW(hSnapshot, &pe32)) {
+        do {
+            // Doğrudan Counter-Strike 2 sürecini arıyoruz
+            if (L"cs2.exe" == std::wstring(pe32.szExeFile)) {
+                pid = pe32.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(hSnapshot, &pe32));
     }
-    return processId;
+    CloseHandle(hSnapshot);
+    return pid;
 }
 
 int main() {
-    // Konsol başlığı standart kalıyor
-    SetConsoleTitleW(L"Universal DLL Injector");
+    SetConsoleTitleA("Axion Otomatik CS2 Injector");
+    
+    std::wcout << L"[+] Axion.dll enjeksiyonu icin Counter-Strike 2 bekleniyor...\\n";
 
-    std::wcout << L"[*] Lutfen enjekte edilecek DLL dosyasini secin...\n";
-    std::wstring dllYolu = KlasordenDllSec();
-
-    if (dllYolu.empty()) {
-        std::wcout << L"[-] Dosya secilmedi. Cikis yapiliyor.\n";
-        Sleep(2000);
-        return 0;
+    // CS2 açılana kadar injector arka planda bekler
+    DWORD targetPID = 0;
+    while (targetPID == 0) {
+        targetPID = CsGOProcessBul();
+        Sleep(500); // İşlemciyi yormamak için yarım saniye bekle
     }
 
-    // Hedef oyun ismi
-    const wchar_t* hedefOyun = L"ProSoccerOnline-Win64-Shipping.exe";
-    std::wcout << L"[*] Oyun bekleniyor...\n";
+    std::wcout << L"[+] CS2 Bulundu! PID: " << targetPID << L"\\n";
+    std::wcout << L"[+] Enjeksiyon islemi baslatiliyor...\\n";
 
-    // Oyun açılana kadar döngüde bekle
-    DWORD pID = 0;
-    while (pID == 0) {
-        pID = OyunIdBul(hedefOyun);
-        Sleep(500);
-    }
-
-    std::wcout << L"[+] Oyun Bulundu! PID: " << pID << L"\n";
-
-    // Windows API fonksiyonlarını kernel32.dll içinden gizlice dinamik olarak çekiyoruz
+    // Dinamik IAT Çözümlemesi ile API çağrıları (Orijinal kodundaki gizlilik yapısı)
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
     if (!hKernel32) return 0;
 
@@ -89,53 +57,71 @@ int main() {
     pCreateRemoteThread _CreateRemoteThread = (pCreateRemoteThread)GetProcAddress(hKernel32, "CreateRemoteThread");
     pVirtualFreeEx _VirtualFreeEx = (pVirtualFreeEx)GetProcAddress(hKernel32, "VirtualFreeEx");
 
-    // Oyuna tam yetkiyle bağlan
-    HANDLE hProcess = _OpenProcess(PROCESS_ALL_ACCESS, FALSE, pID);
+    // Süreç bağlantısı açma
+    HANDLE hProcess = _OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
     if (!hProcess) {
-        std::wcout << L"[-] Oyuna baglanilamadi. Yonetici olarak calistirin.\n";
+        std::wcout << L"[-] CS2 surecine baglanilamadi! Yonetici olarak calistirmayi deneyin.\\n";
         system("pause");
         return 0;
     }
 
-    // Bellek boyutunu Unicode karakter yapısına göre hesapla
-    SIZE_T dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
+    // Aynı klasörde yer alması gereken Axion.dll dosyasının adını tam yol olarak alıyoruz
+    std::wstring dllName = L"Axion.dll";
+    wchar_t fullPath[MAX_PATH];
+    GetFullPathNameW(dllName.c_str(), MAX_PATH, fullPath, nullptr);
+    std::wstring dllYolu(fullPath);
 
-    // Oyun hafızasında yer aç
-    void* ayrilanAlan = _VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // DLL dosyasının klasörde var olup olmadığını kontrol etme
+    DWORD fileAttr = GetFileAttributesW(dllYolu.c_str());
+    if (fileAttr == INVALID_FILE_ATTRIBUTES || (fileAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+        std::wcout << L"[-] Hata: Injector ile ayni klasorde 'Axion.dll' bulunamadi!\\n";
+        CloseHandle(hProcess);
+        system("pause");
+        return 0;
+    }
+
+    size_t dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
+
+    // Oyun hafızasında DLL yolunu yazmak için alan ayırma
+    LPVOID ayrilanAlan = _VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!ayrilanAlan) {
+        std::wcout << L"[-] Oyun hafizasinda alan tahsis edilemedi.\\n";
         CloseHandle(hProcess);
         return 0;
     }
 
-    // Seçilen DLL yolunu oyunun hafızasına yaz (Tür dönüşümü hatası düzeltildi)
-    _WriteProcessMemory(hProcess, ayrilanAlan, (LPCVOID)dllYolu.c_str(), dllPathSize, nullptr);
+    // DLL yolunu oyunun hafızasına yazma
+    if (!_WriteProcessMemory(hProcess, ayrilanAlan, (LPCVOID)dllYolu.c_str(), dllPathSize, nullptr)) {
+        std::wcout << L"[-] Oyun hafizasina veri yazilamadi.\\n";
+        _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
+        CloseHandle(hProcess);
+        return 0;
+    }
 
-    // Yükleyici olarak Unicode destekli LoadLibraryW fonksiyon adresini alıyoruz
+    // LoadLibraryW fonksiyon adresini alıyoruz
     LPVOID loadLibraryAdresi = (LPVOID)GetProcAddress(hKernel32, "LoadLibraryW");
 
-    // Enjeksiyonu stabil CreateRemoteThread ile tetikle
+    // Enjeksiyonu uzak thread oluşturarak tetikleme
     HANDLE hThread = _CreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)loadLibraryAdresi, ayrilanAlan, 0, nullptr);
     if (!hThread) {
-        std::wcout << L"[-] Enjeksiyon basarisiz oldu.\n";
+        std::wcout << L"[-] CreateRemoteThread basarisiz oldu. Anti-cheat engellemis olabilir.\\n";
         _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
         CloseHandle(hProcess);
         system("pause");
         return 0;
     }
 
-    std::wcout << L"[+] Enjeksiyon baslatildi! Oyunun hafizasi taranirken donmasini bekleyin...\n";
+    std::wcout << L"[+] Axion.dll basariyla tetiklendi. Yuklenmesi bekleniyor...\\n";
 
-    // DLL'in oyuna tamamen yüklenmesini bekle
+    // DLL'in oyuna yüklenmesini bekle
     WaitForSingleObject(hThread, INFINITE);
 
-    // BELLEK TEMİZLİĞİ: DLL başarıyla yüklendi, artık arkada bıraktığımız izleri silme zamanı.
-    // Oyun RAM'ine yazdığımız DLL yolunu tamamen boşaltıyoruz.
+    // BELLEK TEMİZLİĞİ: RAM'e yazılan string izini güvenle silme
     _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
-
     CloseHandle(hThread);
     CloseHandle(hProcess);
 
-    std::wcout << L"[+] Islem tamamlandi. Oyunun donmasi gectikten sonra klasorunuzu kontrol edin.\n";
-    Sleep(3000);
+    std::wcout << L"[+] Enjeksiyon basarili! Kapatiliyor...\\n";
+    Sleep(2000);
     return 0;
 }
