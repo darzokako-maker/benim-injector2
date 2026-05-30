@@ -3,6 +3,7 @@
 #include <TlHelp32.h>
 #include <string>
 #include <commdlg.h> 
+#include <limits>
 
 // Gerekli sistem kütüphanelerini bağlayıcıya (Linker) tanıtıyoruz
 #pragma comment(lib, "User32.lib")
@@ -26,6 +27,7 @@ DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
+            // Küçük/büyük harf duyarlılığını azaltmak veya tam eşleşme sağlamak için doğrudan kontrol
             if (islemAdi == std::wstring(pe32.szExeFile)) {
                 pid = pe32.th32ProcessID;
                 break;
@@ -60,14 +62,15 @@ std::wstring DllSecmePenceresi() {
 }
 
 int main() {
-    SetConsoleTitleA("Otomatik DLL Injector");
+    // Konsol Başlığı ayarı
+    SetConsoleTitleA("Ride Otomatik DLL Injector");
 
     std::wstring dllYolu = L"";
-    std::wstring hedefIslem = L"";
+    // İşlem adı uzantısıyla birlikte "Ride.exe" olarak tanımlandı
+    std::wstring hedefIslem = L"Ride.exe"; 
     DWORD targetPID = 0;
-    int secim = 0;
 
-    // 1. ADIM: OTOMATİK DLL SEÇİMİ (Program başlar başlamaz tetiklenir)
+    // 1. ADIM: OTOMATİK DLL SEÇİMİ
     std::cout << "========================================\n";
     std::cout << "       1. ADIM: DLL DOSYASI SECIN       \n";
     std::cout << "========================================\n";
@@ -83,39 +86,21 @@ int main() {
 
     std::wcout << L"[+] Secilen DLL: " << dllYolu << L"\n\n";
 
-    // 2. ADIM: HEDEF BELİRLEME (DLL seçildikten sonra gelir)
+    // 2. ADIM: OTOMATİK İŞLEM TAKİBİ (Ride.exe bekleniyor)
     std::cout << "========================================\n";
-    std::cout << "       2. ADIM: HEDEF SUREC SECIMI      \n";
+    std::cout << "       2. ADIM: ISLEM BEKLENIYOR        \n";
     std::cout << "========================================\n";
-    std::cout << "1 -> Islem Adi ile Takip Et (Ornek: uygulama.exe)\n";
-    std::cout << "2 -> Dogrudan Aktif PID Gir (Ornek: 1234)\n";
-    std::cout << "----------------------------------------\n";
-    std::cout << "Seciminiz: ";
-    std::cin >> secim;
-    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n'); // Buffer temizliği
+    std::wcout << L"[+] '" << hedefIslem << L"' araniyor ve bekleniyor...\n";
+    std::cout << "[+] Lutfen oyunu/uygulamayi baslatin.\n";
 
-    if (secim == 1) {
-        std::wcout << L"\nHedef Islem Adini Girin (uzantisiyla): ";
-        std::getline(std::wcin, hedefIslem);
-        
-        std::wcout << L"[+] " << hedefIslem << L" araniyor/bekleniyor...\n";
-        while (targetPID == 0) {
-            targetPID = IslemAdindanPidBul(hedefIslem);
-            Sleep(300); // İşlemciyi yormamak için kısa bekleme
-        }
-    } 
-    else if (secim == 2) {
-        std::cout << "\nHedef PID degerini girin: ";
-        std::cin >> targetPID;
-    } 
-    else {
-        std::cout << "[-] Gecersiz secim yapildi.\n";
-        system("pause");
-        return 0;
+    // Ride.exe bulunana kadar döngü çalışır
+    while (targetPID == 0) {
+        targetPID = IslemAdindanPidBul(hedefIslem);
+        Sleep(300); // İşlemciyi gereksiz yormamak için kısa bekleme süresi
     }
 
-    std::wcout << L"[+] Hedef Yakalandi! PID: " << targetPID << L"\n\n";
-    std::wcout << L"[+] Enjeksiyon islemleri baslatiliyor...\n";
+    std::wcout << L"\n[+] Hedef Yakalandi! PID: " << targetPID << L"\n";
+    std::wcout << L"[+] Enjeksiyon islemleri baslatiliyor...\n\n";
 
     // 3. ADIM: ENJEKSİYON VE BELLEK YÖNETİMİ
     HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
@@ -132,10 +117,10 @@ int main() {
     pCreateRemoteThread _CreateRemoteThread = (pCreateRemoteThread)GetProcAddress(hKernel32, "CreateRemoteThread");
     pVirtualFreeEx _VirtualFreeEx = (pVirtualFreeEx)GetProcAddress(hKernel32, "VirtualFreeEx");
 
-    // Sürece tam erişim yetkisiyle bağlanma
+    // Hedef sürece tam erişim yetkisiyle bağlanma
     HANDLE hProcess = _OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
     if (!hProcess) {
-        std::cout << "[-] Hedef surece baglanilamadi! Programi 'Yonetici Olarak' calistirmayi deneyin.\n";
+        std::cout << "[-] Hedef surece baglanilamadi! Enjektoru 'Yonetici Olarak' calistirmayi deneyin.\n";
         system("pause");
         return 0;
     }
@@ -167,22 +152,22 @@ int main() {
     // Uzak thread (iş parçacığı) oluşturarak DLL'i yükletme
     HANDLE hThread = _CreateRemoteThread(hProcess, nullptr, 0, loadLibraryAdresi, ayrilanAlan, 0, nullptr);
     if (!hThread) {
-        std::cout << "[-] Uzak is parcacigi olusturulamadi. Antivirus veya yetki engeli olabilir.\n";
+        std::cout << "[-] Uzak is parcacigi olusturulamadi. Yetki veya koruma engeli olabilir.\n";
         _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
         CloseHandle(hProcess);
         system("pause");
         return 0;
     }
 
-    std::cout << "[+] Modul enjekte edildi. Islemin tamamlanmasi bekleniyor...\n";
+    std::cout << "[+] Modul enjekte edildi. Yukleme senkronizasyonu bekleniyor...\n";
     WaitForSingleObject(hThread, INFINITE);
 
-    // Temizlik adımları
+    // Temizlik ve kapatma adımları
     _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
     CloseHandle(hThread);
     CloseHandle(hProcess);
 
-    std::cout << "[+] Islemler basariyla tamamlandi!\n";
+    std::cout << "[+] Enjeksiyon basariyla tamamlandi! Program kapatiliyor.\n";
     Sleep(2000);
     return 0;
 }
