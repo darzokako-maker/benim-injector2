@@ -3,20 +3,95 @@
 #include <TlHelp32.h>
 #include <string>
 #include <commdlg.h> 
+#include <fstream>
 #include <limits>
 
-// Gerekli sistem kütüphanelerini bağlayıcıya (Linker) tanıtıyoruz
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Comdlg32.lib")
 
-// API Gizleme ve Dinamik Çözümleme için Fonksiyon İşaretçileri
-typedef HANDLE(WINAPI* pOpenProcess)(DWORD, BOOL, DWORD);
-typedef LPVOID(WINAPI* pVirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
-typedef BOOL(WINAPI* pWriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
-typedef HANDLE(WINAPI* pCreateRemoteThread)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
-typedef BOOL(WINAPI* pVirtualFreeEx)(HANDLE, LPVOID, SIZE_T, DWORD);
+// 64-bit (x64) mimari için kritik haritalama verileri yapısı
+struct MAPPING_DATA {
+    PVOID pLoadLibraryA;
+    PVOID pGetProcAddress;
+    PVOID pBaseAddress;
+};
 
-// Çalışan işlemler arasından girilen isme göre PID bulan fonksiyon
+// Uzak süreçte yürütülecek 64-bit uyumlu kabuk kod (Shellcode)
+static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
+    if (!pData) return 0;
+
+    typedef HMODULE(WINAPI* tLoadLibraryA)(LPCSTR);
+    typedef FARPROC(WINAPI* tGetProcAddress)(HMODULE, LPCSTR);
+    typedef BOOL(WINAPI* tDllMain)(HINSTANCE, DWORD, LPVOID);
+
+    tLoadLibraryA _LoadLibraryA = (tLoadLibraryA)pData->pLoadLibraryA;
+    tGetProcAddress _GetProcAddress = (tGetProcAddress)pData->pGetProcAddress;
+
+    PBYTE pBase = (PBYTE)pData->pBaseAddress;
+
+    auto* pOpt = &((PIMAGE_NT_HEADERS)(pBase + ((PIMAGE_DOS_HEADER)pBase)->e_lfanew))->OptionalHeader;
+
+    // 1. IAT (Import Address Table) Çözümlemesi - Bağımlı kütüphanelerin yüklenmesi
+    auto* pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+    if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size) {
+        while (pImportDesc->Name) {
+            HMODULE hMod = _LoadLibraryA((LPCSTR)(pBase + pImportDesc->Name));
+            if (!hMod) return 0;
+
+            auto* pThunkRef = (PIMAGE_THUNK_DATA)(pBase + pImportDesc->FirstThunk);
+            auto* pFuncRef = (PIMAGE_THUNK_DATA)(pBase + pImportDesc->OriginalFirstThunk);
+            if (!pFuncRef) pFuncRef = pThunkRef;
+
+            while (pFuncRef->u1.AddressOfData) {
+                if (IMAGE_SNAP_BY_ORDINAL(pFuncRef->u1.Ordinal)) {
+                    * (FARPROC*)&pThunkRef->u1.Function = _GetProcAddress(hMod, (LPCSTR)(pFuncRef->u1.Ordinal & 0xFFFF));
+                } else {
+                    auto* pImportByName = (PIMAGE_IMPORT_BY_NAME)(pBase + pFuncRef->u1.AddressOfData);
+                    * (FARPROC*)&pThunkRef->u1.Function = _GetProcAddress(hMod, (LPCSTR)pImportByName->Name);
+                }
+                pThunkRef++;
+                pFuncRef++;
+            }
+            pImportDesc++;
+        }
+    }
+
+    // 2. 64-Bit Base Relocation (Adres Yeniden Konumlandırma) İşlemleri
+    // Delta ve kaydırma işlemleri tamamen 64-bit (ULONGLONG) adres genişliğindedir.
+    if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
+        auto* pReloc = (PIMAGE_BASE_RELOCATION)(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
+        ULONGLONG delta = (ULONGLONG)((PBYTE)pBase - pOpt->ImageBase);
+
+        while (pReloc->VirtualAddress) {
+            UINT size = (pReloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            PWORD pRelativeInfo = (PWORD)(pReloc + 1);
+
+            for (UINT i = 0; i < size; ++i) {
+                int type = pRelativeInfo[i] >> 12;
+                int offset = pRelativeInfo[i] & 0xFFF;
+
+                // 64-bit kütüphanelerde yeniden konumlandırma tipi IMAGE_REL_BASED_DIR64'tür.
+                if (type == IMAGE_REL_BASED_DIR64 || type == IMAGE_REL_BASED_HIGHLOW) {
+                    ULONGLONG* pPatch = (ULONGLONG*)(pBase + pReloc->VirtualAddress + offset);
+                    *pPatch += delta;
+                }
+            }
+            pReloc = (PIMAGE_BASE_RELOCATION)((PBYTE)pReloc + pReloc->SizeOfBlock);
+        }
+    }
+
+    // 3. DllMain Giriş Noktasının Tetiklenmesi
+    if (pOpt->AddressOfEntryPoint) {
+        tDllMain _DllMain = (tDllMain)(pBase + pOpt->AddressOfEntryPoint);
+        return _DllMain((HINSTANCE)pBase, DLL_PROCESS_ATTACH, nullptr);
+    }
+
+    return 1;
+}
+// Kabuk kodunun bellekte bittiği sınırı belirleyen boş fonksiyon
+static void __stdcall ShellcodeEnd() {}
+
+// Çalışan aktif süreçler listesinden isim eşleşmesine göre PID dönen fonksiyon
 DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
     DWORD pid = 0;
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -27,7 +102,6 @@ DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
-            // Küçük/büyük harf duyarlılığını azaltmak veya tam eşleşme sağlamak için doğrudan kontrol
             if (islemAdi == std::wstring(pe32.szExeFile)) {
                 pid = pe32.th32ProcessID;
                 break;
@@ -38,7 +112,7 @@ DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
     return pid;
 }
 
-// Windows Dosya Gezginini açarak DLL seçtiren fonksiyon
+// Windows yerleşik dosya gezgini üzerinden DLL seçtiren görsel arayüz fonksiyonu
 std::wstring DllSecmePenceresi() {
     OPENFILENAMEW ofn;
     wchar_t dosyaYolu[MAX_PATH] = L"";
@@ -50,124 +124,140 @@ std::wstring DllSecmePenceresi() {
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrFilter = L"Dynamic Link Library (*.dll)\0*.dll\0Tum Dosyalar (*.*)\0*.*\0";
     ofn.nFilterIndex = 1;
-    ofn.lpstrFileTitle = NULL;
-    ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = NULL;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
-    if (GetOpenFileNameW(&ofn)) {
-        return std::wstring(dosyaYolu);
-    }
+    if (GetOpenFileNameW(&ofn)) return std::wstring(dosyaYolu);
     return L"";
 }
 
 int main() {
-    // Konsol Başlığı ayarı
-    SetConsoleTitleA("Ride Otomatik DLL Injector");
+    SetConsoleTitleA("X64 Pro Soccer Online Manual Mapper");
 
     std::wstring dllYolu = L"";
-    // İşlem adı uzantısıyla birlikte "Ride.exe" olarak tanımlandı
-    std::wstring hedefIslem = L"Ride.exe"; 
+    std::wstring hedefIslem = L"";
     DWORD targetPID = 0;
 
-    // 1. ADIM: OTOMATİK DLL SEÇİMİ
+    // 1. ADIM: DLL SEÇİM PENCERESİNİN OTOMATİK AÇILMASI
     std::cout << "========================================\n";
-    std::cout << "       1. ADIM: DLL DOSYASI SECIN       \n";
+    std::cout << "      1. ADIM: ENJEKTE EDILECEK DLL      \n";
     std::cout << "========================================\n";
-    std::cout << "[+] Dosya secme penceresi aciliyor...\n";
+    std::cout << "[+] Lutfen yuklemek istediginiz DLL dosyasini secin...\n";
     
     dllYolu = DllSecmePenceresi();
-
     if (dllYolu.empty()) {
-        std::cout << "[-] DLL secilmedi veya iptal edildi. Program kapatiliyor.\n";
+        std::cout << "[-] DLL secilmedi veya pencere kapatildi. Program sonlandiriliyor.\n";
         system("pause");
         return 0;
     }
-
     std::wcout << L"[+] Secilen DLL: " << dllYolu << L"\n\n";
 
-    // 2. ADIM: OTOMATİK İŞLEM TAKİBİ (Ride.exe bekleniyor)
+    // 2. ADIM: MANUEL PRO SOCCER ONLINE İŞLEM ADI GİRİŞİ
     std::cout << "========================================\n";
-    std::cout << "       2. ADIM: ISLEM BEKLENIYOR        \n";
+    std::cout << "      2. ADIM: HEDEF SUREC BELIRLEME    \n";
     std::cout << "========================================\n";
-    std::wcout << L"[+] '" << hedefIslem << L"' araniyor ve bekleniyor...\n";
-    std::cout << "[+] Lutfen oyunu/uygulamayi baslatin.\n";
+    std::cout << "Oyunun exe adini girin (Ornek: ProSoccerOnline.exe veya ProSoccerOnline-Win64-Shipping.exe):\n";
+    std::wcout << L"Giris: ";
+    std::getline(std::wcin, hedefIslem);
 
-    // Ride.exe bulunana kadar döngü çalışır
+    if (hedefIslem.empty()) {
+        std::cout << "[-] Gecersiz veya bos islem adi girildi.\n";
+        system("pause");
+        return 0;
+    }
+
+    std::wcout << L"\n[+] '" << hedefIslem << L"' sureci aranıyor... Lutfen oyunu baslatin.\n";
     while (targetPID == 0) {
         targetPID = IslemAdindanPidBul(hedefIslem);
-        Sleep(300); // İşlemciyi gereksiz yormamak için kısa bekleme süresi
+        Sleep(300); // Sürekli döngünün CPU'yu şişirmemesi için gecikme
     }
+    std::wcout << L"[+] Hedef oyun bulundu! PID: " << targetPID << L"\n\n";
 
-    std::wcout << L"\n[+] Hedef Yakalandi! PID: " << targetPID << L"\n";
-    std::wcout << L"[+] Enjeksiyon islemleri baslatiliyor...\n\n";
-
-    // 3. ADIM: ENJEKSİYON VE BELLEK YÖNETİMİ
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    if (!hKernel32) {
-        std::cout << "[-] kernel32.dll adresi alinamadi.\n";
+    // 3. ADIM: MANUAL MAPPING PROSEDÜRÜ
+    // DLL dosyasının binary olarak belleğe okunması
+    std::ifstream file(dllYolu, std::ios::binary | std::ios::ate);
+    if (file.fail()) {
+        std::cout << "[-] Belirtilen DLL dosyasi okunmak icin acilamadi.\n";
         system("pause");
         return 0;
     }
 
-    // Dinamik API adreslerinin çözümlenmesi
-    pOpenProcess _OpenProcess = (pOpenProcess)GetProcAddress(hKernel32, "OpenProcess");
-    pVirtualAllocEx _VirtualAllocEx = (pVirtualAllocEx)GetProcAddress(hKernel32, "VirtualAllocEx");
-    pWriteProcessMemory _WriteProcessMemory = (pWriteProcessMemory)GetProcAddress(hKernel32, "WriteProcessMemory");
-    pCreateRemoteThread _CreateRemoteThread = (pCreateRemoteThread)GetProcAddress(hKernel32, "CreateRemoteThread");
-    pVirtualFreeEx _VirtualFreeEx = (pVirtualFreeEx)GetProcAddress(hKernel32, "VirtualFreeEx");
+    auto fileSize = file.tellg();
+    auto* pSrcData = new BYTE[(UINT_PTR)fileSize];
+    file.seekg(0, std::ios::beg);
+    file.read((char*)pSrcData, fileSize);
+    file.close();
 
-    // Hedef sürece tam erişim yetkisiyle bağlanma
-    HANDLE hProcess = _OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
+    auto* pDosHeader = (PIMAGE_DOS_HEADER)pSrcData;
+    auto* pNtHeaders = (PIMAGE_NT_HEADERS)(pSrcData + pDosHeader->e_lfanew);
+
+    // Hedef sürece bellek yönetim haklarıyla bağlanma
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
     if (!hProcess) {
-        std::cout << "[-] Hedef surece baglanilamadi! Enjektoru 'Yonetici Olarak' calistirmayi deneyin.\n";
+        std::cout << "[-] Oyuna baglanilamadi! Lutfen enjektoru 'Yonetici Olarak' calistirin.\n";
+        delete[] pSrcData;
         system("pause");
         return 0;
     }
 
-    // Unicode (wchar_t) boyut hesaplaması
-    size_t dllPathSize = (dllYolu.length() + 1) * sizeof(wchar_t);
-
-    // Hedef sürecin hafızasında yer açma
-    LPVOID ayrilanAlan = _VirtualAllocEx(hProcess, nullptr, dllPathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!ayrilanAlan) {
-        std::cout << "[-] Hedef bellek alaninda yer tahsis edilemedi.\n";
+    // Pro Soccer Online sanal bellek alanında DLL imaj boyutu kadar yer açılması
+    LPVOID pTargetBase = VirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!pTargetBase) {
+        std::cout << "[-] Hedef oyun surecinde sanal bellek tahsis edilemedi.\n";
         CloseHandle(hProcess);
+        delete[] pSrcData;
         system("pause");
         return 0;
     }
 
-    // DLL yolunu açılan hafıza alanına yazma
-    if (!_WriteProcessMemory(hProcess, ayrilanAlan, (LPCVOID)dllYolu.c_str(), dllPathSize, nullptr)) {
-        std::cout << "[-] Hedef bellege veri yazma islemi basarisiz.\n";
-        _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
-        CloseHandle(hProcess);
-        system("pause");
-        return 0;
+    // PE (Portable Executable) başlıklarının yazılması
+    WriteProcessMemory(hProcess, pTargetBase, pSrcData, pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr);
+
+    // DLL bölümlerinin (Sections) hedef bellek adreslerine hizalanarak yazılması
+    auto* pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
+    for (UINT i = 0; i != pNtHeaders->FileHeader.NumberOfSections; ++i, ++pSectionHeader) {
+        if (pSectionHeader->SizeOfRawData) {
+            WriteProcessMemory(hProcess, (LPVOID)((PBYTE)pTargetBase + pSectionHeader->VirtualAddress), pSrcData + pSectionHeader->PointerToRawData, pSectionHeader->SizeOfRawData, nullptr);
+        }
     }
 
-    // LoadLibraryW fonksiyonunun adresini alma
-    PTHREAD_START_ROUTINE loadLibraryAdresi = (PTHREAD_START_ROUTINE)GetProcAddress(hKernel32, "LoadLibraryW");
+    // Haritalama parametrelerinin hazırlanması
+    MAPPING_DATA data;
+    data.pLoadLibraryA = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
+    data.pGetProcAddress = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress");
+    data.pBaseAddress = pTargetBase;
 
-    // Uzak thread (iş parçacığı) oluşturarak DLL'i yükletme
-    HANDLE hThread = _CreateRemoteThread(hProcess, nullptr, 0, loadLibraryAdresi, ayrilanAlan, 0, nullptr);
+    // Argümanların ve Shellcode'un hedef sürece transfer edilmesi
+    LPVOID pMappingDataTarget = VirtualAllocEx(hProcess, nullptr, sizeof(MAPPING_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    WriteProcessMemory(hProcess, pMappingDataTarget, &data, sizeof(MAPPING_DATA), nullptr);
+
+    DWORD shellcodeSize = (DWORD)((PBYTE)ShellcodeEnd - (PBYTE)Shellcode);
+    LPVOID pShellcodeTarget = VirtualAllocEx(hProcess, nullptr, shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    WriteProcessMemory(hProcess, pShellcodeTarget, (LPCVOID)Shellcode, shellcodeSize, nullptr);
+
+    // Uzak iş parçacığı (Remote Thread) vasıtasıyla yükleyici kabuk kodun koşturulması
+    HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcodeTarget, pMappingDataTarget, 0, nullptr);
     if (!hThread) {
-        std::cout << "[-] Uzak is parcacigi olusturulamadi. Yetki veya koruma engeli olabilir.\n";
-        _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
+        std::cout << "[-] CreateRemoteThread basarisiz oldu. Korumalar enjeksiyonu engelliyor olabilir.\n";
+        VirtualFreeEx(hProcess, pTargetBase, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
+        VirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
         CloseHandle(hProcess);
+        delete[] pSrcData;
         system("pause");
         return 0;
     }
 
-    std::cout << "[+] Modul enjekte edildi. Yukleme senkronizasyonu bekleniyor...\n";
+    std::cout << "[+] Veriler haritalandirildi. DllMain tetiklenmesi bekleniyor...\n";
     WaitForSingleObject(hThread, INFINITE);
 
-    // Temizlik ve kapatma adımları
-    _VirtualFreeEx(hProcess, ayrilanAlan, 0, MEM_RELEASE);
+    // Çalıştırılan geçici Shellcode ve yapı verilerinin temizlenmesi (DLL imajı korunur)
+    VirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
+    VirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
     CloseHandle(hThread);
     CloseHandle(hProcess);
+    delete[] pSrcData;
 
-    std::cout << "[+] Enjeksiyon basariyla tamamlandi! Program kapatiliyor.\n";
+    std::cout << "[+] Manual Mapping enjeksiyonu basariyla sonlandirildi!\n";
     Sleep(2000);
     return 0;
 }
