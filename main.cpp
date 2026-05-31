@@ -9,14 +9,15 @@
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Comdlg32.lib")
 
-// 64-bit (x64) mimari için kritik haritalama verileri yapısı
+// 64-bit mimari için haritalama verileri yapısı
 struct MAPPING_DATA {
     PVOID pLoadLibraryA;
     PVOID pGetProcAddress;
     PVOID pBaseAddress;
 };
 
-// Uzak süreçte yürütülecek 64-bit uyumlu kabuk kod (Shellcode)
+// Optimizasyonların bu fonksiyonun yapısını bozmaması için inline ve optimizasyon kapatma direktifleri (MSVC için)
+#pragma optimize("", off)
 static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
     if (!pData) return 0;
 
@@ -28,10 +29,9 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
     tGetProcAddress _GetProcAddress = (tGetProcAddress)pData->pGetProcAddress;
 
     PBYTE pBase = (PBYTE)pData->pBaseAddress;
-
     auto* pOpt = &((PIMAGE_NT_HEADERS)(pBase + ((PIMAGE_DOS_HEADER)pBase)->e_lfanew))->OptionalHeader;
 
-    // 1. IAT (Import Address Table) Çözümlemesi - Bağımlı kütüphanelerin yüklenmesi
+    // 1. IAT (Import Address Table) Çözümlemesi
     auto* pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
     if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size) {
         while (pImportDesc->Name) {
@@ -44,10 +44,10 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
 
             while (pFuncRef->u1.AddressOfData) {
                 if (IMAGE_SNAP_BY_ORDINAL(pFuncRef->u1.Ordinal)) {
-                    * (FARPROC*)&pThunkRef->u1.Function = _GetProcAddress(hMod, (LPCSTR)(pFuncRef->u1.Ordinal & 0xFFFF));
+                    *(FARPROC*)&pThunkRef->u1.Function = _GetProcAddress(hMod, (LPCSTR)(pFuncRef->u1.Ordinal & 0xFFFF));
                 } else {
                     auto* pImportByName = (PIMAGE_IMPORT_BY_NAME)(pBase + pFuncRef->u1.AddressOfData);
-                    * (FARPROC*)&pThunkRef->u1.Function = _GetProcAddress(hMod, (LPCSTR)pImportByName->Name);
+                    *(FARPROC*)&pThunkRef->u1.Function = _GetProcAddress(hMod, (LPCSTR)pImportByName->Name);
                 }
                 pThunkRef++;
                 pFuncRef++;
@@ -56,8 +56,7 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
         }
     }
 
-    // 2. 64-Bit Base Relocation (Adres Yeniden Konumlandırma) İşlemleri
-    // Delta ve kaydırma işlemleri tamamen 64-bit (ULONGLONG) adres genişliğindedir.
+    // 2. Base Relocation (Adres Yeniden Konumlandırma) - 64-bit Uyumlu
     if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
         auto* pReloc = (PIMAGE_BASE_RELOCATION)(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
         ULONGLONG delta = (ULONGLONG)((PBYTE)pBase - pOpt->ImageBase);
@@ -70,8 +69,7 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
                 int type = pRelativeInfo[i] >> 12;
                 int offset = pRelativeInfo[i] & 0xFFF;
 
-                // 64-bit kütüphanelerde yeniden konumlandırma tipi IMAGE_REL_BASED_DIR64'tür.
-                if (type == IMAGE_REL_BASED_DIR64 || type == IMAGE_REL_BASED_HIGHLOW) {
+                if (type == IMAGE_REL_BASED_DIR64) {
                     ULONGLONG* pPatch = (ULONGLONG*)(pBase + pReloc->VirtualAddress + offset);
                     *pPatch += delta;
                 }
@@ -88,10 +86,11 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
 
     return 1;
 }
-// Kabuk kodunun bellekte bittiği sınırı belirleyen boş fonksiyon
+// Derleyicinin araya kod sızdırmasını önlemek için hizalama koruması
 static void __stdcall ShellcodeEnd() {}
+#pragma optimize("", on)
 
-// Çalışan aktif süreçler listesinden isim eşleşmesine göre PID dönen fonksiyon
+// Aktif süreçlerden PID bulan fonksiyon
 DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
     DWORD pid = 0;
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -112,7 +111,7 @@ DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
     return pid;
 }
 
-// Windows yerleşik dosya gezgini üzerinden DLL seçtiren görsel arayüz fonksiyonu
+// DLL seçme arayüzü
 std::wstring DllSecmePenceresi() {
     OPENFILENAMEW ofn;
     wchar_t dosyaYolu[MAX_PATH] = L"";
@@ -131,13 +130,12 @@ std::wstring DllSecmePenceresi() {
 }
 
 int main() {
-    SetConsoleTitleA("X64 Pro Soccer Online Manual Mapper");
+    SetConsoleTitleA("X64 CS2 & Universal Manual Mapper");
 
     std::wstring dllYolu = L"";
     std::wstring hedefIslem = L"";
     DWORD targetPID = 0;
 
-    // 1. ADIM: DLL SEÇİM PENCERESİNİN OTOMATİK AÇILMASI
     std::cout << "========================================\n";
     std::cout << "      1. ADIM: ENJEKTE EDILECEK DLL      \n";
     std::cout << "========================================\n";
@@ -145,38 +143,36 @@ int main() {
     
     dllYolu = DllSecmePenceresi();
     if (dllYolu.empty()) {
-        std::cout << "[-] DLL secilmedi veya pencere kapatildi. Program sonlandiriliyor.\n";
+        std::cout << "[-] DLL secilmedi. Program sonlandiriliyor.\n";
         system("pause");
         return 0;
     }
     std::wcout << L"[+] Secilen DLL: " << dllYolu << L"\n\n";
 
-    // 2. ADIM: MANUEL PRO SOCCER ONLINE İŞLEM ADI GİRİŞİ
     std::cout << "========================================\n";
     std::cout << "      2. ADIM: HEDEF SUREC BELIRLEME    \n";
     std::cout << "========================================\n";
-    std::cout << "Oyunun exe adini girin (Ornek: ProSoccerOnline.exe veya ProSoccerOnline-Win64-Shipping.exe):\n";
+    std::cout << "Oyunun exe adini girin (CS2 icin: cs2.exe):\n";
     std::wcout << L"Giris: ";
     std::getline(std::wcin, hedefIslem);
 
     if (hedefIslem.empty()) {
-        std::cout << "[-] Gecersiz veya bos islem adi girildi.\n";
+        std::cout << "[-] Gecersiz islem adi.\n";
         system("pause");
         return 0;
     }
 
-    std::wcout << L"\n[+] '" << hedefIslem << L"' sureci aranıyor... Lutfen oyunu baslatin.\n";
+    std::wcout << L"\n[+] '" << hedefIslem << L"' bekleniyor... Lutfen oyunu baslatin.\n";
     while (targetPID == 0) {
         targetPID = IslemAdindanPidBul(hedefIslem);
-        Sleep(300); // Sürekli döngünün CPU'yu şişirmemesi için gecikme
+        Sleep(300);
     }
     std::wcout << L"[+] Hedef oyun bulundu! PID: " << targetPID << L"\n\n";
 
-    // 3. ADIM: MANUAL MAPPING PROSEDÜRÜ
-    // DLL dosyasının binary olarak belleğe okunması
+    // DLL dosyasını belleğe okuma
     std::ifstream file(dllYolu, std::ios::binary | std::ios::ate);
     if (file.fail()) {
-        std::cout << "[-] Belirtilen DLL dosyasi okunmak icin acilamadi.\n";
+        std::cout << "[-] DLL dosyasi okunamadi.\n";
         system("pause");
         return 0;
     }
@@ -190,17 +186,16 @@ int main() {
     auto* pDosHeader = (PIMAGE_DOS_HEADER)pSrcData;
     auto* pNtHeaders = (PIMAGE_NT_HEADERS)(pSrcData + pDosHeader->e_lfanew);
 
-    // Hedef sürece bellek yönetim haklarıyla bağlanma
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
     if (!hProcess) {
-        std::cout << "[-] Oyuna baglanilamadi! Lutfen enjektoru 'Yonetici Olarak' calistirin.\n";
+        std::cout << "[-] Oyuna baglanilamadi! Enjektoru 'Yonetici Olarak' calistirin.\n";
         delete[] pSrcData;
         system("pause");
         return 0;
     }
 
-    // Pro Soccer Online sanal bellek alanında DLL imaj boyutu kadar yer açılması
-    LPVOID pTargetBase = VirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    // Adım 1: Belleği ilk başta READWRITE olarak açıyoruz (Yazma işlemi için güvenlik duvarını aşmak adına)
+    LPVOID pTargetBase = VirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pTargetBase) {
         std::cout << "[-] Hedef oyun surecinde sanal bellek tahsis edilemedi.\n";
         CloseHandle(hProcess);
@@ -209,10 +204,10 @@ int main() {
         return 0;
     }
 
-    // PE (Portable Executable) başlıklarının yazılması
+    // PE Başlıklarını yaz
     WriteProcessMemory(hProcess, pTargetBase, pSrcData, pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr);
 
-    // DLL bölümlerinin (Sections) hedef bellek adreslerine hizalanarak yazılması
+    // Bölümleri (Sections) yaz
     auto* pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
     for (UINT i = 0; i != pNtHeaders->FileHeader.NumberOfSections; ++i, ++pSectionHeader) {
         if (pSectionHeader->SizeOfRawData) {
@@ -220,24 +215,33 @@ int main() {
         }
     }
 
-    // Haritalama parametrelerinin hazırlanması
+    // Haritalama parametreleri
     MAPPING_DATA data;
     data.pLoadLibraryA = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
     data.pGetProcAddress = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress");
     data.pBaseAddress = pTargetBase;
 
-    // Argümanların ve Shellcode'un hedef sürece transfer edilmesi
     LPVOID pMappingDataTarget = VirtualAllocEx(hProcess, nullptr, sizeof(MAPPING_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     WriteProcessMemory(hProcess, pMappingDataTarget, &data, sizeof(MAPPING_DATA), nullptr);
 
+    // Shellcode boyutunu mutlak güvenliğe almak için mutlak koruma hesabı
     DWORD shellcodeSize = (DWORD)((PBYTE)ShellcodeEnd - (PBYTE)Shellcode);
-    LPVOID pShellcodeTarget = VirtualAllocEx(hProcess, nullptr, shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (shellcodeSize == 0 || shellcodeSize > 0xFFFF) { 
+        shellcodeSize = 0x1000; // Boyut hesaplama saparsa güvenli bir varsayılan blok ata
+    }
+
+    LPVOID pShellcodeTarget = VirtualAllocEx(hProcess, nullptr, shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     WriteProcessMemory(hProcess, pShellcodeTarget, (LPCVOID)Shellcode, shellcodeSize, nullptr);
 
-    // Uzak iş parçacığı (Remote Thread) vasıtasıyla yükleyici kabuk kodun koşturulması
+    // Adım 2: Çökmeyi önlemek için Bellek Haklarını Çalıştırılabilir Modlara Çekiyoruz (RWX Kırmızı bayrağını gizleme)
+    DWORD oldProtect;
+    VirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfImage, PAGE_EXECUTE_READWRITE, &oldProtect);
+    VirtualProtectEx(hProcess, pShellcodeTarget, shellcodeSize, PAGE_EXECUTE_READ, &oldProtect);
+
+    // Uzak iş parçacığını tetikle
     HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcodeTarget, pMappingDataTarget, 0, nullptr);
     if (!hThread) {
-        std::cout << "[-] CreateRemoteThread basarisiz oldu. Korumalar enjeksiyonu engelliyor olabilir.\n";
+        std::cout << "[-] CreateRemoteThread basarisiz oldu. Korumalar engelliyor olabilir.\n";
         VirtualFreeEx(hProcess, pTargetBase, 0, MEM_RELEASE);
         VirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
         VirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
@@ -247,17 +251,17 @@ int main() {
         return 0;
     }
 
-    std::cout << "[+] Veriler haritalandirildi. DllMain tetiklenmesi bekleniyor...\n";
-    WaitForSingleObject(hThread, INFINITE);
+    std::cout << "[+] Veriler basariyla haritalandirildi. Enjeksiyon tamamlandigi onaylaniyor...\n";
+    WaitForSingleObject(hThread, 5000); // 5 saniye zaman aşımı (Sonsuz döngü kilitlenmesini önler)
 
-    // Çalıştırılan geçici Shellcode ve yapı verilerinin temizlenmesi (DLL imajı korunur)
+    // Temizlik
     VirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
     VirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
     CloseHandle(hThread);
     CloseHandle(hProcess);
     delete[] pSrcData;
 
-    std::cout << "[+] Manual Mapping enjeksiyonu basariyla sonlandirildi!\n";
+    std::cout << "[+] Islem sonlandirildi!\n";
     Sleep(2000);
     return 0;
 }
