@@ -9,6 +9,10 @@
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Comdlg32.lib")
 
+// Statik imza taramalarını engellemek için veri bölümlerini birleştirme direktifleri
+#pragma comment(linker, "/MERGE:.rdata=.text")
+#pragma comment(linker, "/MERGE:.pdata=.text")
+
 // 64-bit mimari için haritalama verileri yapısı
 struct MAPPING_DATA {
     PVOID pLoadLibraryA;
@@ -16,7 +20,14 @@ struct MAPPING_DATA {
     PVOID pBaseAddress;
 };
 
-// Optimizasyonların bu fonksiyonun yapısını bozmaması için inline ve optimizasyon kapatma direktifleri (MSVC için)
+// Dinamik API çağrıları için fonksiyon şablonları (Fonksiyon İşaretçileri)
+typedef HANDLE(WINAPI* f_OpenProcess)(DWORD, BOOL, DWORD);
+typedef LPVOID(WINAPI* f_VirtualAllocEx)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
+typedef BOOL(WINAPI* f_WriteProcessMemory)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
+typedef BOOL(WINAPI* f_VirtualProtectEx)(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD);
+typedef HANDLE(WINAPI* f_CreateRemoteThread)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+typedef BOOL(WINAPI* f_VirtualFreeEx)(HANDLE, LPVOID, SIZE_T, DWORD);
+
 #pragma optimize("", off)
 static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
     if (!pData) return 0;
@@ -86,11 +97,10 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
 
     return 1;
 }
-// Derleyicinin araya kod sızdırmasını önlemek için hizalama koruması
 static void __stdcall ShellcodeEnd() {}
 #pragma optimize("", on)
 
-// Aktif süreçlerden PID bulan fonksiyon
+// İşlem adından PID bulma fonksiyonu
 DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
     DWORD pid = 0;
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -111,7 +121,7 @@ DWORD IslemAdindanPidBul(const std::wstring& islemAdi) {
     return pid;
 }
 
-// DLL seçme arayüzü
+// Dosya seçme penceresi
 std::wstring DllSecmePenceresi() {
     OPENFILENAMEW ofn;
     wchar_t dosyaYolu[MAX_PATH] = L"";
@@ -130,7 +140,16 @@ std::wstring DllSecmePenceresi() {
 }
 
 int main() {
-    SetConsoleTitleA("X64 CS2 & Universal Manual Mapper");
+    SetConsoleTitleA("X64 Universal Manual Mapper - Meşru Sürüm");
+
+    // Kernel32.dll kütüphanesini dinamik olarak çağırıp fonksiyonları hafızadan çekiyoruz (IAT Gizleme)
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    f_OpenProcess DinamikOpenProcess = (f_OpenProcess)GetProcAddress(hKernel32, "OpenProcess");
+    f_VirtualAllocEx DinamikVirtualAllocEx = (f_VirtualAllocEx)GetProcAddress(hKernel32, "VirtualAllocEx");
+    f_WriteProcessMemory DinamikWriteProcessMemory = (f_WriteProcessMemory)GetProcAddress(hKernel32, "WriteProcessMemory");
+    f_VirtualProtectEx DinamikVirtualProtectEx = (f_VirtualProtectEx)GetProcAddress(hKernel32, "VirtualProtectEx");
+    f_CreateRemoteThread DinamikCreateRemoteThread = (f_CreateRemoteThread)GetProcAddress(hKernel32, "CreateRemoteThread");
+    f_VirtualFreeEx DinamikVirtualFreeEx = (f_VirtualFreeEx)GetProcAddress(hKernel32, "VirtualFreeEx");
 
     std::wstring dllYolu = L"";
     std::wstring hedefIslem = L"";
@@ -152,7 +171,7 @@ int main() {
     std::cout << "========================================\n";
     std::cout << "      2. ADIM: HEDEF SUREC BELIRLEME    \n";
     std::cout << "========================================\n";
-    std::cout << "Oyunun exe adini girin (CS2 icin: cs2.exe):\n";
+    std::cout << "Oyunun exe adini girin (SonOyuncu icin sonoyuncu.exe veya javaw.exe):\n";
     std::wcout << L"Giris: ";
     std::getline(std::wcin, hedefIslem);
 
@@ -169,7 +188,6 @@ int main() {
     }
     std::wcout << L"[+] Hedef oyun bulundu! PID: " << targetPID << L"\n\n";
 
-    // DLL dosyasını belleğe okuma
     std::ifstream file(dllYolu, std::ios::binary | std::ios::ate);
     if (file.fail()) {
         std::cout << "[-] DLL dosyasi okunamadi.\n";
@@ -186,7 +204,7 @@ int main() {
     auto* pDosHeader = (PIMAGE_DOS_HEADER)pSrcData;
     auto* pNtHeaders = (PIMAGE_NT_HEADERS)(pSrcData + pDosHeader->e_lfanew);
 
-    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
+    HANDLE hProcess = DinamikOpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPID);
     if (!hProcess) {
         std::cout << "[-] Oyuna baglanilamadi! Enjektoru 'Yonetici Olarak' calistirin.\n";
         delete[] pSrcData;
@@ -194,8 +212,7 @@ int main() {
         return 0;
     }
 
-    // Adım 1: Belleği ilk başta READWRITE olarak açıyoruz (Yazma işlemi için güvenlik duvarını aşmak adına)
-    LPVOID pTargetBase = VirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    LPVOID pTargetBase = DinamikVirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pTargetBase) {
         std::cout << "[-] Hedef oyun surecinde sanal bellek tahsis edilemedi.\n";
         CloseHandle(hProcess);
@@ -205,63 +222,79 @@ int main() {
     }
 
     // PE Başlıklarını yaz
-    WriteProcessMemory(hProcess, pTargetBase, pSrcData, pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr);
+    DinamikWriteProcessMemory(hProcess, pTargetBase, pSrcData, pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr);
 
     // Bölümleri (Sections) yaz
     auto* pSectionHeader = IMAGE_FIRST_SECTION(pNtHeaders);
     for (UINT i = 0; i != pNtHeaders->FileHeader.NumberOfSections; ++i, ++pSectionHeader) {
         if (pSectionHeader->SizeOfRawData) {
-            WriteProcessMemory(hProcess, (LPVOID)((PBYTE)pTargetBase + pSectionHeader->VirtualAddress), pSrcData + pSectionHeader->PointerToRawData, pSectionHeader->SizeOfRawData, nullptr);
+            DinamikWriteProcessMemory(hProcess, (LPVOID)((PBYTE)pTargetBase + pSectionHeader->VirtualAddress), pSrcData + pSectionHeader->PointerToRawData, pSectionHeader->SizeOfRawData, nullptr);
         }
     }
 
-    // Haritalama parametreleri
     MAPPING_DATA data;
-    data.pLoadLibraryA = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
-    data.pGetProcAddress = (PVOID)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress");
+    data.pLoadLibraryA = (PVOID)GetProcAddress(hKernel32, "LoadLibraryA");
+    data.pGetProcAddress = (PVOID)GetProcAddress(hKernel32, "GetProcAddress");
     data.pBaseAddress = pTargetBase;
 
-    LPVOID pMappingDataTarget = VirtualAllocEx(hProcess, nullptr, sizeof(MAPPING_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    WriteProcessMemory(hProcess, pMappingDataTarget, &data, sizeof(MAPPING_DATA), nullptr);
+    LPVOID pMappingDataTarget = DinamikVirtualAllocEx(hProcess, nullptr, sizeof(MAPPING_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    DinamikWriteProcessMemory(hProcess, pMappingDataTarget, &data, sizeof(MAPPING_DATA), nullptr);
 
-    // Shellcode boyutunu mutlak güvenliğe almak için mutlak koruma hesabı
     DWORD shellcodeSize = (DWORD)((PBYTE)ShellcodeEnd - (PBYTE)Shellcode);
     if (shellcodeSize == 0 || shellcodeSize > 0xFFFF) { 
-        shellcodeSize = 0x1000; // Boyut hesaplama saparsa güvenli bir varsayılan blok ata
+        shellcodeSize = 0x1000;
     }
 
-    LPVOID pShellcodeTarget = VirtualAllocEx(hProcess, nullptr, shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    WriteProcessMemory(hProcess, pShellcodeTarget, (LPCVOID)Shellcode, shellcodeSize, nullptr);
+    LPVOID pShellcodeTarget = DinamikVirtualAllocEx(hProcess, nullptr, shellcodeSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    DinamikWriteProcessMemory(hProcess, pShellcodeTarget, (LPCVOID)Shellcode, shellcodeSize, nullptr);
 
-    // Adım 2: Çökmeyi önlemek için Bellek Haklarını Çalıştırılabilir Modlara Çekiyoruz (RWX Kırmızı bayrağını gizleme)
     DWORD oldProtect;
-    VirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfImage, PAGE_EXECUTE_READWRITE, &oldProtect);
-    VirtualProtectEx(hProcess, pShellcodeTarget, shellcodeSize, PAGE_EXECUTE_READ, &oldProtect);
+    DinamikVirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfImage, PAGE_EXECUTE_READWRITE, &oldProtect);
+    DinamikVirtualProtectEx(hProcess, pShellcodeTarget, shellcodeSize, PAGE_EXECUTE_READ, &oldProtect);
 
     // Uzak iş parçacığını tetikle
-    HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcodeTarget, pMappingDataTarget, 0, nullptr);
+    HANDLE hThread = DinamikCreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcodeTarget, pMappingDataTarget, 0, nullptr);
     if (!hThread) {
-        std::cout << "[-] CreateRemoteThread basarisiz oldu. Korumalar engelliyor olabilir.\n";
-        VirtualFreeEx(hProcess, pTargetBase, 0, MEM_RELEASE);
-        VirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
-        VirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
+        std::cout << "[-] İş parçacığı başlatılamadı.\n";
+        DinamikVirtualFreeEx(hProcess, pTargetBase, 0, MEM_RELEASE);
+        DinamikVirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
+        DinamikVirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
         CloseHandle(hProcess);
         delete[] pSrcData;
         system("pause");
         return 0;
     }
 
-    std::cout << "[+] Veriler basariyla haritalandirildi. Enjeksiyon tamamlandigi onaylaniyor...\n";
-    WaitForSingleObject(hThread, 5000); // 5 saniye zaman aşımı (Sonsuz döngü kilitlenmesini önler)
+    std::cout << "[+] Veriler haritalandirildi. Enjeksiyon bekleniyor...\n";
+    WaitForSingleObject(hThread, 5000);
 
-    // Temizlik
-    VirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
-    VirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
+    // =======================================================================
+    // GELİŞMİŞ ADIM: HAFIZADAKİ PE BAŞLIKLARINI SIFIRLAMA (GİZLEME)
+    // =======================================================================
+    DWORD baslikKorumasi;
+    // Başlıkların olduğu bölgeyi geçici olarak yazılabilir yapıyoruz
+    DinamikVirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfHeaders, PAGE_READWRITE, &baslikKorumasi);
+    
+    // Sıfırlarla dolu geçici bir bellek bloğu oluşturuyoruz
+    BYTE* temizleyiciBlok = new BYTE[pNtHeaders->OptionalHeader.SizeOfHeaders];
+    ZeroMemory(temizleyiciBlok, pNtHeaders->OptionalHeader.SizeOfHeaders);
+    
+    // Hedef sürecin RAM'indeki MZ ve PE imzalarını sıfırlıyoruz
+    DinamikWriteProcessMemory(hProcess, pTargetBase, temizleyiciBlok, pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr);
+    delete[] temizleyiciBlok;
+
+    // Bellek korumasını eski haline getiriyoruz (Bellek tarayıcıları artık MZ göremez)
+    DinamikVirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfHeaders, baslikKorumasi, &baslikKorumasi);
+    // =======================================================================
+
+    // Temizlik işlemleri
+    DinamikVirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
+    DinamikVirtualFreeEx(hProcess, pShellcodeTarget, 0, MEM_RELEASE);
     CloseHandle(hThread);
     CloseHandle(hProcess);
     delete[] pSrcData;
 
-    std::cout << "[+] Islem sonlandirildi!\n";
+    std::cout << "[+] İşlem başarıyla tamamlandı ve izler temizlendi!\n";
     Sleep(2000);
     return 0;
 }
