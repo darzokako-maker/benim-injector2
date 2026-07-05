@@ -13,6 +13,21 @@
 #pragma comment(linker, "/MERGE:.rdata=.text")
 #pragma comment(linker, "/MERGE:.pdata=.text")
 
+// =======================================================================
+// JUNK CODE VE ANTI-ANALYSIS MAKROLARI
+// =======================================================================
+// Derleyicinin (Compiler) silmesini engellemek için 'volatile' kullanılmıştır.
+// Bu makrolar işlemciye zarar vermez, mantığı bozmaz, sadece Assembly imzasını değiştirir.
+#define JUNK_CODE_1() { \
+    volatile int ja = 0x1E2; volatile int jb = 0x4B3; \
+    for (int i = 0; i < 3; i++) { ja = (ja + jb) ^ 0x5F; jb = (jb - ja) * 2; } \
+}
+
+#define JUNK_CODE_2() { \
+    volatile DWORD kA = 0x99; volatile DWORD kB = 0x11; \
+    if ((kA * kB) == 0) { kA = 0xFF; } else { kB = kA + 0xAA; } \
+}
+
 // 64-bit mimari için haritalama verileri yapısı
 struct MAPPING_DATA {
     PVOID pLoadLibraryA;
@@ -32,6 +47,8 @@ typedef BOOL(WINAPI* f_VirtualFreeEx)(HANDLE, LPVOID, SIZE_T, DWORD);
 static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
     if (!pData) return 0;
 
+    JUNK_CODE_1();
+
     typedef HMODULE(WINAPI* tLoadLibraryA)(LPCSTR);
     typedef FARPROC(WINAPI* tGetProcAddress)(HMODULE, LPCSTR);
     typedef BOOL(WINAPI* tDllMain)(HINSTANCE, DWORD, LPVOID);
@@ -46,6 +63,7 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
     auto* pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
     if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size) {
         while (pImportDesc->Name) {
+            JUNK_CODE_2();
             HMODULE hMod = _LoadLibraryA((LPCSTR)(pBase + pImportDesc->Name));
             if (!hMod) return 0;
 
@@ -66,6 +84,8 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
             pImportDesc++;
         }
     }
+
+    JUNK_CODE_1();
 
     // 2. Base Relocation (Adres Yeniden Konumlandırma) - 64-bit Uyumlu
     if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
@@ -89,6 +109,8 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
         }
     }
 
+    JUNK_CODE_2();
+
     // 3. DllMain Giriş Noktasının Tetiklenmesi
     if (pOpt->AddressOfEntryPoint) {
         tDllMain _DllMain = (tDllMain)(pBase + pOpt->AddressOfEntryPoint);
@@ -97,7 +119,11 @@ static DWORD WINAPI Shellcode(MAPPING_DATA* pData) {
 
     return 1;
 }
-static void __stdcall ShellcodeEnd() {}
+
+// Derleyicinin araya başka fonksiyon sıkıştırmasını engellemek için noinline kullanıldı
+__declspec(noinline) static void __stdcall ShellcodeEnd() {
+    volatile int antiOptimization = 0xDEADBEEF;
+}
 #pragma optimize("", on)
 
 // İşlem adından PID bulma fonksiyonu
@@ -142,8 +168,13 @@ std::wstring DllSecmePenceresi() {
 int main() {
     SetConsoleTitleA("X64 Universal Manual Mapper - Meşru Sürüm");
 
-    // Kernel32.dll kütüphanesini dinamik olarak çağırıp fonksiyonları hafızadan çekiyoruz (IAT Gizleme)
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    // "kernel32.dll" ismini açık metin (string) olarak bırakmamak için dizi haline getirdik (Statik analizleri şaşırtır)
+    char k32[] = { 'k','e','r','n','e','l','3','2','.','d','l','l', 0 };
+    HMODULE hKernel32 = GetModuleHandleA(k32);
+
+    JUNK_CODE_1();
+
+    // Dinamik API yüklemeleri
     f_OpenProcess DinamikOpenProcess = (f_OpenProcess)GetProcAddress(hKernel32, "OpenProcess");
     f_VirtualAllocEx DinamikVirtualAllocEx = (f_VirtualAllocEx)GetProcAddress(hKernel32, "VirtualAllocEx");
     f_WriteProcessMemory DinamikWriteProcessMemory = (f_WriteProcessMemory)GetProcAddress(hKernel32, "WriteProcessMemory");
@@ -212,6 +243,13 @@ int main() {
         return 0;
     }
 
+    // Opaque Predicate örneği: Asla true olamayacak karmaşık bir mantıksal kontrol
+    volatile int opX = 40; volatile int opY = 80;
+    if ((opX * opY) < 0) {
+        // Bu kod bloğu asla çalışmaz, analiz araçlarını yanıltmak için konulmuştur.
+        ExitProcess(0);
+    }
+
     LPVOID pTargetBase = DinamikVirtualAllocEx(hProcess, nullptr, pNtHeaders->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pTargetBase) {
         std::cout << "[-] Hedef oyun surecinde sanal bellek tahsis edilemedi.\n";
@@ -252,6 +290,8 @@ int main() {
     DinamikVirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfImage, PAGE_EXECUTE_READWRITE, &oldProtect);
     DinamikVirtualProtectEx(hProcess, pShellcodeTarget, shellcodeSize, PAGE_EXECUTE_READ, &oldProtect);
 
+    JUNK_CODE_1();
+
     // Uzak iş parçacığını tetikle
     HANDLE hThread = DinamikCreateRemoteThread(hProcess, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcodeTarget, pMappingDataTarget, 0, nullptr);
     if (!hThread) {
@@ -272,20 +312,18 @@ int main() {
     // GELİŞMİŞ ADIM: HAFIZADAKİ PE BAŞLIKLARINI SIFIRLAMA (GİZLEME)
     // =======================================================================
     DWORD baslikKorumasi;
-    // Başlıkların olduğu bölgeyi geçici olarak yazılabilir yapıyoruz
     DinamikVirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfHeaders, PAGE_READWRITE, &baslikKorumasi);
     
-    // Sıfırlarla dolu geçici bir bellek bloğu oluşturuyoruz
     BYTE* temizleyiciBlok = new BYTE[pNtHeaders->OptionalHeader.SizeOfHeaders];
     ZeroMemory(temizleyiciBlok, pNtHeaders->OptionalHeader.SizeOfHeaders);
     
-    // Hedef sürecin RAM'indeki MZ ve PE imzalarını sıfırlıyoruz
     DinamikWriteProcessMemory(hProcess, pTargetBase, temizleyiciBlok, pNtHeaders->OptionalHeader.SizeOfHeaders, nullptr);
     delete[] temizleyiciBlok;
 
-    // Bellek korumasını eski haline getiriyoruz (Bellek tarayıcıları artık MZ göremez)
     DinamikVirtualProtectEx(hProcess, pTargetBase, pNtHeaders->OptionalHeader.SizeOfHeaders, baslikKorumasi, &baslikKorumasi);
     // =======================================================================
+
+    JUNK_CODE_2();
 
     // Temizlik işlemleri
     DinamikVirtualFreeEx(hProcess, pMappingDataTarget, 0, MEM_RELEASE);
