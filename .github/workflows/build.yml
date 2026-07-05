@@ -1,27 +1,24 @@
-name: Automated Injector Build
+name: VS Build
 
-on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
+on: [push]
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
-    - name: Depoyu Bilgisayara Cek (Checkout)
+    - name: Depoyu Klonla
       uses: actions/checkout@v4
 
-    - name: MSVC Ortamini Yukle ve Kodu Derle (Compile)
-      shell: cmd
-      run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-        cl.exe /EHsc /O2 /DUNICODE /D_UNICODE /Fe:Injector.exe main.cpp user32.lib comdlg32.lib /link /machine:x64
+    # Microsoft'un resmi MSBuild kurulum aksiyonu
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
 
-    - name: Olusan EXE Dosyasini Yukle (Artifact)
-      uses: actions/upload-artifact@v4
-      with:
-        name: Bellek_Korumali_Injector
-        path: Injector.exe
-        
+    # Projeyi NuGet paketleri bağımlılığı varsa geri yükle (Opsiyonel)
+    #- name: Restore NuGet Packages
+    #  run: nuget restore ProjeAdi.sln
+
+    # Çözüm dosyasını derle
+    - name: Build Solution
+      run: msbuild ProjeAdi.sln /p:Configuration=Release /p:Platform=x64
+      
