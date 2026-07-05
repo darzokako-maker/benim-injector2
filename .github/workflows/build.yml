@@ -1,6 +1,6 @@
-name: VS Build
+name: C++ Build and Export Exe
 
-on: [push]
+on: [push, pull_request]
 
 jobs:
   build:
@@ -10,15 +10,23 @@ jobs:
     - name: Depoyu Klonla
       uses: actions/checkout@v4
 
-    # Microsoft'un resmi MSBuild kurulum aksiyonu
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v2
+    # MSVC Geliştirici Komut Satırı Ortamını Yükler
+    - name: Setup MSVC Developer Command Prompt
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64 # 64-bit mimari için derleme yapar
 
-    # Projeyi NuGet paketleri bağımlılığı varsa geri yükle (Opsiyonel)
-    #- name: Restore NuGet Packages
-    #  run: nuget restore ProjeAdi.sln
+    # cl.exe ile kaynak kodunu derler ve .exe üretir
+    - name: C++ Kodunu Derle
+      run: |
+        cl.exe /EHsc main.cpp /Fe:Uygulama.exe
 
-    # Çözüm dosyasını derle
-    - name: Build Solution
-      run: msbuild ProjeAdi.sln /p:Configuration=Release /p:Platform=x64
-      
+    # =======================================================================
+    # .EXE DOSYASINI ARTIFACT OLARAK YÜKLEME (İNDİRİLEBİLİR YAPMA)
+    # =======================================================================
+    - name: Derlenen Exe Dosyasini Yukle
+      uses: actions/upload-artifact@v4
+      with:
+        name: Derlenmiş-Uygulama       # GitHub panelinde görünecek zip dosyasının adı
+        path: Uygulama.exe             # Sanal makinede üretilen ve indirilecek olan dosyanın yolu
+        
